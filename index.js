@@ -44,8 +44,16 @@ app.use((req, res, next) => {
 });
 
 // 4) Health-check (no auth)
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+// Simple logger middleware
+app.use((req, res, next) => {
+  // Skip logging for the health endpoint
+  if (req.path === '/health') return next();
+
+  const now = new Date().toISOString();
+  console.log(`\n[${now}] ▶ ${req.method} ${req.path}`);
+  if (req.method === 'GET')    console.log('   → Query:', req.query);
+  if (req.method === 'POST')   console.log('   → Body :', req.body);
+  next();
 });
 
 // 5) GET /tokens?userId=123
