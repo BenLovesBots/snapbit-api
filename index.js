@@ -7,33 +7,37 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Simple logger middleware
+// 1) Simple logger middleware (skips /health)
 app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+
   const now = new Date().toISOString();
   console.log(`\n[${now}] ▶ ${req.method} ${req.path}`);
-  if (req.method === 'GET')    console.log('   → Query:', req.query);
-  if (req.method === 'POST')   console.log('   → Body :', req.body);
+  if (req.method === 'GET')  console.log('   → Query:', req.query);
+  if (req.method === 'POST') console.log('   → Body :',  req.body);
   next();
 });
 
-// 1) Connect to MongoDB
+// 2) Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, {
+  // these options are now defaults; you can remove them if you like
   useNewUrlParser:    true,
   useUnifiedTopology: true,
 })
 .then(() => console.log('✅ MongoDB connected'))
 .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// 2) Define the Token model
+// 3) Define the Token model
 const tokenSchema = new mongoose.Schema({
   userId: { type: String, unique: true, required: true },
   tokens: { type: Number, default: 0 },
 });
 const Token = mongoose.model('Token', tokenSchema);
 
-// 3) API-key middleware (skips /health)
+// 4) API-key middleware (skips /health)
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
+
   const auth = req.get('Authorization') || '';
   console.log(`   → Authorization header: ${auth}`);
   if (auth !== `Bearer ${process.env.API_KEY}`) {
@@ -43,20 +47,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// 4) Health-check (no auth)
-// Simple logger middleware
-app.use((req, res, next) => {
-  // Skip logging for the health endpoint
-  if (req.path === '/health') return next();
-
-  const now = new Date().toISOString();
-  console.log(`\n[${now}] ▶ ${req.method} ${req.path}`);
-  if (req.method === 'GET')    console.log('   → Query:', req.query);
-  if (req.method === 'POST')   console.log('   → Body :', req.body);
-  next();
+// 5) Health-check route
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' });
 });
 
-// 5) GET /tokens?userId=123
+// 6) GET /tokens?userId=123
 app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
   console.log(`   ↪ Fetching tokens for userId=${userId}`);
@@ -77,7 +73,7 @@ app.get('/tokens', async (req, res) => {
   res.json({ userId, tokens: record.tokens });
 });
 
-// 6) POST /tokens/add  { userId, amount }
+// 7) POST /tokens/add  { userId, amount }
 app.post('/tokens/add', async (req, res) => {
   const { userId, amount } = req.body;
   console.log(`   ↪ Adding tokens: userId=${userId}, amount=${amount}`);
@@ -95,7 +91,7 @@ app.post('/tokens/add', async (req, res) => {
   res.json({ userId, newTotal: record.tokens });
 });
 
-// 7) Start the server
+// 8) Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 SnapBit API listening on http://localhost:${PORT}`);
