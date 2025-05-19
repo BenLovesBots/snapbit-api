@@ -45,7 +45,6 @@ app.use((req, res, next) => {
 
 // 4) Health-check (no auth)
 app.get('/health', (req, res) => {
-  console.log('   ✅ Health check');
   res.json({ status: 'ok' });
 });
 
