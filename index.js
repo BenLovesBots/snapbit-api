@@ -7,13 +7,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// -------------------------------------------------------------------
 // 1) Connect to MongoDB
+// -------------------------------------------------------------------
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser:    true,
   useUnifiedTopology: true,
-});
+})
+  .catch(err => console.error('MongoDB connection error:', err));
 
+// -------------------------------------------------------------------
 // 2) Define the Token model (with isRegistered + league fields)
+// -------------------------------------------------------------------
 const tokenSchema = new mongoose.Schema({
   userId:       { type: String, unique: true, required: true },
   tokens:       { type: Number, default: 0 },
@@ -22,7 +27,9 @@ const tokenSchema = new mongoose.Schema({
 });
 const Token = mongoose.model('Token', tokenSchema);
 
+// -------------------------------------------------------------------
 // 3) API‐key middleware (skips /health)
+// -------------------------------------------------------------------
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
   const auth = req.get('Authorization') || '';
@@ -32,12 +39,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// -------------------------------------------------------------------
 // 4) Health‐check route
+// -------------------------------------------------------------------
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+// -------------------------------------------------------------------
 // Helper: assign league based on token count
+// -------------------------------------------------------------------
 function determineLeague(tokenCount) {
   if (tokenCount >= 2000) return 'Diamond';
   if (tokenCount >= 1000) return 'Obsidian';
@@ -50,8 +61,11 @@ function determineLeague(tokenCount) {
   return 'Bronze';
 }
 
+// -------------------------------------------------------------------
 // 5) GET /tokens?userId=XYZ
-//    - Create a new record with 0 tokens if none exists
+//    - If no record exists, create one with 0 tokens, isRegistered=false, league=Bronze.
+//    - Always return { userId, tokens, isRegistered, league }.
+// -------------------------------------------------------------------
 app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
   if (!userId) {
@@ -76,8 +90,10 @@ app.get('/tokens', async (req, res) => {
   });
 });
 
+// -------------------------------------------------------------------
 // 6) POST /tokens/add  { userId, amount }
-//    - Increment tokens, set isRegistered=true if first award, update league
+//    - Increments tokens; sets isRegistered=true (if not already); updates league.
+// -------------------------------------------------------------------
 app.post('/tokens/add', async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || typeof amount !== 'number') {
@@ -105,6 +121,39 @@ app.post('/tokens/add', async (req, res) => {
   return res.json({ userId, newTotal: record.tokens, league: record.league });
 });
 
-// 7) Start the server
+// -------------------------------------------------------------------
+// 7) POST /tokens/register  { userId }
+//    - Marks isRegistered = true (no token change). Returns updated record.
+// -------------------------------------------------------------------
+app.post('/tokens/register', async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing userId' });
+  }
+
+  let record = await Token.findOne({ userId });
+  if (!record) {
+    record = await Token.create({
+      userId,
+      tokens: 0,
+      isRegistered: true,
+      league: 'Bronze'
+    });
+  } else if (!record.isRegistered) {
+    record.isRegistered = true;
+    await record.save();
+  }
+
+  return res.json({
+    userId:       record.userId,
+    tokens:       record.tokens,
+    isRegistered: record.isRegistered,
+    league:       record.league
+  });
+});
+
+// -------------------------------------------------------------------
+// 8) Start the server
+// -------------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT);
