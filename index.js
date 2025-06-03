@@ -6,7 +6,7 @@ const crypto       = require('crypto');
 const jwt          = require('jsonwebtoken');
 const jwkToPem     = require('jwk-to-pem');
 const cookieParser = require('cookie-parser');
-const fetch        = require('node-fetch'); // ensure node-fetch v2 is installed
+const fetch        = require('node-fetch'); // ← Add this line
 
 const app = express();
 app.use(express.json());
@@ -142,17 +142,21 @@ app.get('/oauth/callback', async (req, res) => {
     return res.status(500).send('Error during Roblox token exchange.');
   }
 
+  // Fetch Roblox JWKS
   let jwks;
   try {
     const jwksRes = await fetch('https://apis.roblox.com/oauth/v1/keys');
     if (!jwksRes.ok) {
+      console.error('JWKS fetch status:', jwksRes.status);
       return res.status(500).send('Failed to fetch Roblox JWKS.');
     }
     jwks = await jwksRes.json();
   } catch (err) {
+    console.error('JWKS fetch error:', err);
     return res.status(500).send('Error fetching Roblox JWKS.');
   }
 
+  // Verify ID token
   const decodedHeader = jwt.decode(tokenData.id_token, { complete: true });
   if (!decodedHeader || !decodedHeader.header.kid) {
     return res.status(400).send('Invalid ID token header.');
