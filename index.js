@@ -1,18 +1,17 @@
 // index.js
+
 require('dotenv').config();
 const express      = require('express');
 const mongoose     = require('mongoose');
 const crypto       = require('crypto');
-const jwt          = require('jsonwebtoken');
-const jwkToPem     = require('jwk-to-pem');
 const cookieParser = require('cookie-parser');
-const fetch        = require('node-fetch'); // ← Add this line
+const fetch        = require('node-fetch'); // v2.x
+const app          = express();
 
-const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// === CONFIGURATION ===
+// ─── CONFIGURATION ─────────────────────────────────────────────────────────────
 const {
   MONGO_URI,
   API_KEY,
@@ -20,10 +19,10 @@ const {
   ROBLOX_CLIENT_SECRET
 } = process.env;
 
-const PORT = process.env.PORT || 3000;
+const PORT         = process.env.PORT || 3000;
 const REDIRECT_URI = 'https://snapbit-api.onrender.com/oauth/callback';
 
-// === MONGOOSE SETUP ===
+// ─── MONGOOSE SETUP ─────────────────────────────────────────────────────────────
 mongoose.connect(MONGO_URI, {
   useNewUrlParser:    true,
   useUnifiedTopology: true
@@ -39,7 +38,7 @@ const tokenSchema = new mongoose.Schema({
 });
 const Token = mongoose.model('Token', tokenSchema);
 
-// === LEAGUE CALCULATION ===
+// ─── LEAGUE CALCULATION ─────────────────────────────────────────────────────────
 function calculateLeague(tokenCount) {
   if (tokenCount >= 50) return 'Diamond';
   if (tokenCount >= 30) return 'Sapphire';
@@ -48,19 +47,21 @@ function calculateLeague(tokenCount) {
   return 'Bronze';
 }
 
-// === COOKIE OPTIONS (SameSite=None, Secure) ===
+// ─── COOKIE OPTIONS ──────────────────────────────────────────────────────────────
+// We must set SameSite=None & secure=true so that the cookie is sent back
+// when Roblox (a third‐party domain) redirects to /oauth/callback.
 function cookieOptions() {
   return {
     httpOnly: true,
-    secure:   true,      // must be true for SameSite=None
-    sameSite: 'None',    // allow cross-site redirect from Roblox
+    secure:   true,     // MUST be true because SameSite=None
+    sameSite: 'None',   // allow cross-site redirect from Roblox
     path:     '/'
   };
 }
 
-// === MIDDLEWARE: API-KEY CHECK ===
+// ─── MIDDLEWARE: API-KEY CHECK ────────────────────────────────────────────────────
 app.use((req, res, next) => {
-  // Skip auth for health, /auth, /oauth routes
+  // Skip API‐key check for /health, /auth, /oauth/*
   if (
     req.path === '/health' ||
     req.path.startsWith('/auth') ||
@@ -68,6 +69,7 @@ app.use((req, res, next) => {
   ) {
     return next();
   }
+
   const auth = req.get('Authorization') || '';
   if (auth !== `Bearer ${API_KEY}`) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -75,35 +77,41 @@ app.use((req, res, next) => {
   next();
 });
 
-// === 1) Health-check ===
+// ─── 1) Health-check ─────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   return res.json({ status: 'ok' });
 });
 
-// === 2) /auth → Generate state, set cookie, redirect to Roblox ===
+// ─── 2) /auth → REDIRECT TO ROBLOX AUTHORIZATION ENDPOINT ─────────────────────────
 app.get('/auth', (req, res) => {
+  // 1) Generate random state and set it as a secure, SameSite=None cookie
   const state = crypto.randomBytes(16).toString('hex');
   res.cookie('oauth_state', state, cookieOptions());
 
-  const authUrl = new URL('https://apis.roblox.com/oauth/v1/authorize');
-  authUrl.searchParams.set('client_id',     ROBLOX_CLIENT_ID);
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('redirect_uri',  REDIRECT_URI);
-  authUrl.searchParams.set('scope',         'openid profile');
-  authUrl.searchParams.set('state',         state);
+  // 2) Build the Roblox /v1/authorize URL
+  const authorizeUrl = new URL('https://apis.roblox.com/oauth/v1/authorize');
+  authorizeUrl.searchParams.set('client_id',     ROBLOX_CLIENT_ID);
+  authorizeUrl.searchParams.set('response_type', 'code');
+  authorizeUrl.searchParams.set('redirect_uri',  REDIRECT_URI);
+  authorizeUrl.searchParams.set('scope',         'openid profile');
+  authorizeUrl.searchParams.set('state',         state);
+  // (You could also send prompt=login or prompt=consent if desired.)
 
-  return res.redirect(authUrl.toString());
+  // 3) Redirect the user’s browser to Roblox’s authorization page
+  return res.redirect(authorizeUrl.toString());
 });
 
-// === 3) /oauth/callback ===
+// ─── 3) /oauth/callback → HANDLE ROBLOX REDIRECT, EXCHANGE CODE, CALL /userinfo ───
 app.get('/oauth/callback', async (req, res) => {
   const { code, state: returnedState, error, error_description } = req.query;
 
+  // 1) If user denied or Roblox returned an error
   if (error) {
     const desc = decodeURIComponent(error_description || 'No description');
     return res.status(400).send(`Authorization failed: ${error} — ${desc}`);
   }
 
+  // 2) Verify that the state matches the cookie
   const storedState = req.cookies.oauth_state;
   if (!returnedState || returnedState !== storedState) {
     return res.status(400).send(
@@ -112,18 +120,28 @@ app.get('/oauth/callback', async (req, res) => {
     );
   }
 
+  // 3) Exchange the authorization code for tokens (access_token + refresh_token)
   let tokenData;
   try {
     const tokenUrl  = 'https://apis.roblox.com/oauth/v1/token';
-    const basicAuth = Buffer.from(
-      `${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`
-    ).toString('base64');
+    const basicAuth = Buffer.from(`${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`)
+                        .toString('base64');
     const params = new URLSearchParams({
       grant_type:   'authorization_code',
       code:         code,
-      redirect_uri: REDIRECT_URI
+      redirect_uri: REDIRECT_URI,
+      client_id:    ROBLOX_CLIENT_ID,
+      client_secret: ROBLOX_CLIENT_SECRET
+      // Note: Roblox supports both sending client_id/secret via Basic Auth or in body.
+      // Using Basic Auth header is recommended:
+      //
+      // headers: {
+      //   'Authorization': `Basic ${basicAuth}`,
+      //   'Content-Type':  'application/x-www-form-urlencoded'
+      // }
     });
 
+    // Perform the POST request
     const tokenResponse = await fetch(tokenUrl, {
       method: 'POST',
       headers: {
@@ -132,59 +150,52 @@ app.get('/oauth/callback', async (req, res) => {
       },
       body: params.toString()
     });
+
     if (!tokenResponse.ok) {
-      return res
-        .status(tokenResponse.status)
-        .send('Failed to exchange code for tokens.');
+      console.error('Token exchange failed:', await tokenResponse.text());
+      return res.status(tokenResponse.status).send('Failed to exchange code for tokens.');
     }
     tokenData = await tokenResponse.json();
+    // tokenData includes { access_token, refresh_token, token_type, expires_in, scope }
   } catch (err) {
+    console.error('Error during token exchange:', err);
     return res.status(500).send('Error during Roblox token exchange.');
   }
 
-  // Fetch Roblox JWKS
-  let jwks;
+  // 4) Call Roblox’s /v1/userinfo endpoint to get the user’s “sub” (Roblox ID)
+  let userInfo;
   try {
-    const jwksRes = await fetch('https://apis.roblox.com/oauth/v1/keys');
-    if (!jwksRes.ok) {
-      console.error('JWKS fetch status:', jwksRes.status);
-      return res.status(500).send('Failed to fetch Roblox JWKS.');
-    }
-    jwks = await jwksRes.json();
-  } catch (err) {
-    console.error('JWKS fetch error:', err);
-    return res.status(500).send('Error fetching Roblox JWKS.');
-  }
-
-  // Verify ID token
-  const decodedHeader = jwt.decode(tokenData.id_token, { complete: true });
-  if (!decodedHeader || !decodedHeader.header.kid) {
-    return res.status(400).send('Invalid ID token header.');
-  }
-  const jwk = jwks.keys.find(k => k.kid === decodedHeader.header.kid);
-  if (!jwk) {
-    return res.status(401).send('Unable to find matching JWKS key.');
-  }
-  let payload;
-  try {
-    const pem = jwkToPem(jwk);
-    payload = jwt.verify(tokenData.id_token, pem, {
-      algorithms: ['RS256'],
-      issuer:     'https://apis.roblox.com',
-      audience:   ROBLOX_CLIENT_ID
+    const userInfoUrl = 'https://apis.roblox.com/oauth/v1/userinfo';
+    const userRes = await fetch(userInfoUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${tokenData.access_token}`
+      }
     });
+    if (!userRes.ok) {
+      console.error('Failed to fetch userinfo:', await userRes.text());
+      return res.status(500).send('Failed to fetch Roblox user info.');
+    }
+    userInfo = await userRes.json();
+    // Example userInfo: { sub: "12345678", name: "ExampleUser", preferred_username: "ExampleUser", ... }
   } catch (err) {
-    return res.status(401).send('Invalid or expired ID token.');
+    console.error('Error fetching userinfo:', err);
+    return res.status(500).send('Error fetching Roblox user info.');
   }
 
-  const robloxId = payload.sub;
-  // Clear the state cookie (must use same options object)
+  // 5) Now we have the Roblox user ID in userInfo.sub
+  const robloxId = userInfo.sub;
+  // (Optionally extract userInfo.preferred_username, userInfo.name, etc.)
+
+  // 6) Clear the state cookie so it can’t be replayed
   res.clearCookie('oauth_state', cookieOptions());
 
+  // 7) Redirect the player back to your front-end dashboard
+  //    We pass along userId as a query param so the front-end can call /tokens
   return res.redirect(`https://snapbitportal.web.app/dashboard?userId=${robloxId}`);
 });
 
-// === 4) GET /tokens?userId=... ===
+// ─── 4) GET /tokens?userId=<…> ────────────────────────────────────────────────────
 app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
   if (!userId) {
@@ -193,8 +204,15 @@ app.get('/tokens', async (req, res) => {
 
   let record = await Token.findOne({ userId });
   if (!record) {
-    record = await Token.create({ userId, tokens: 0, league: 'Bronze', isRegistered: false });
+    // First‐time user ⇒ create a new document
+    record = await Token.create({
+      userId,
+      tokens: 0,
+      league: 'Bronze',
+      isRegistered: false
+    });
   } else {
+    // Update league if token count has changed since last time
     const newLeague = calculateLeague(record.tokens);
     if (newLeague !== record.league) {
       record.league = newLeague;
@@ -210,7 +228,7 @@ app.get('/tokens', async (req, res) => {
   });
 });
 
-// === 5) POST /tokens/add ===
+// ─── 5) POST /tokens/add { userId, amount } ───────────────────────────────────────
 app.post('/tokens/add', async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || typeof amount !== 'number') {
@@ -223,6 +241,7 @@ app.post('/tokens/add', async (req, res) => {
     { new: true, upsert: true }
   );
 
+  // Recalculate league
   const updatedLeague = calculateLeague(record.tokens);
   if (updatedLeague !== record.league) {
     record.league = updatedLeague;
@@ -230,13 +249,13 @@ app.post('/tokens/add', async (req, res) => {
   }
 
   return res.json({
-    userId:  record.userId,
+    userId:   record.userId,
     newTotal: record.tokens,
     league:   record.league
   });
 });
 
-// === 6) POST /tokens/register ===
+// ─── 6) POST /tokens/register { userId } ─────────────────────────────────────────
 app.post('/tokens/register', async (req, res) => {
   const { userId } = req.body;
   if (!userId) {
@@ -251,7 +270,7 @@ app.post('/tokens/register', async (req, res) => {
   return res.json({ userId: record.userId, isRegistered: record.isRegistered });
 });
 
-// === Start Server ===
+// ─── Start the server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 SnapBit API listening on port ${PORT}`);
 });
