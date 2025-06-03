@@ -6,6 +6,7 @@ const crypto       = require('crypto');
 const jwt          = require('jsonwebtoken');
 const jwkToPem     = require('jwk-to-pem');
 const cookieParser = require('cookie-parser');
+const fetch        = require('node-fetch'); // ensure node-fetch v2 is installed
 
 const app = express();
 app.use(express.json());
@@ -47,18 +48,19 @@ function calculateLeague(tokenCount) {
   return 'Bronze';
 }
 
-// === PROTOCOL-AWARE COOKIE OPTIONS ===
-function cookieOptions(req) {
+// === COOKIE OPTIONS (SameSite=None, Secure) ===
+function cookieOptions() {
   return {
     httpOnly: true,
-    secure:   req.protocol === 'https',  // only secure if request is HTTPS
-    sameSite: 'Strict',
+    secure:   true,      // must be true for SameSite=None
+    sameSite: 'None',    // allow cross-site redirect from Roblox
     path:     '/'
   };
 }
 
 // === MIDDLEWARE: API-KEY CHECK ===
 app.use((req, res, next) => {
+  // Skip auth for health, /auth, /oauth routes
   if (
     req.path === '/health' ||
     req.path.startsWith('/auth') ||
@@ -81,7 +83,7 @@ app.get('/health', (req, res) => {
 // === 2) /auth → Generate state, set cookie, redirect to Roblox ===
 app.get('/auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
-  res.cookie('oauth_state', state, cookieOptions(req));
+  res.cookie('oauth_state', state, cookieOptions());
 
   const authUrl = new URL('https://apis.roblox.com/oauth/v1/authorize');
   authUrl.searchParams.set('client_id',     ROBLOX_CLIENT_ID);
@@ -106,7 +108,7 @@ app.get('/oauth/callback', async (req, res) => {
   if (!returnedState || returnedState !== storedState) {
     return res.status(400).send(
       `Security check failed (state mismatch).<br>` +
-      `Ensure you accessed via HTTPS (so the cookie is sent) and that cookies are enabled.`
+      `Ensure you accessed via HTTPS and that cookies are enabled.`
     );
   }
 
@@ -172,7 +174,8 @@ app.get('/oauth/callback', async (req, res) => {
   }
 
   const robloxId = payload.sub;
-  res.clearCookie('oauth_state', cookieOptions(req));
+  // Clear the state cookie (must use same options object)
+  res.clearCookie('oauth_state', cookieOptions());
 
   return res.redirect(`https://snapbitportal.web.app/dashboard?userId=${robloxId}`);
 });
