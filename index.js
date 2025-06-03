@@ -121,25 +121,43 @@ app.get('/oauth/callback', async (req, res) => {
   }
 
   // 3) Exchange the authorization code for tokens (access_token + refresh_token)
-  let tokenData;
-  try {
-    const tokenUrl  = 'https://apis.roblox.com/oauth/v1/token';
-    const basicAuth = Buffer.from(`${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`)
-                        .toString('base64');
-    const params = new URLSearchParams({
-      grant_type:   'authorization_code',
-      code:         code,
-      redirect_uri: REDIRECT_URI,
-      client_id:    ROBLOX_CLIENT_ID,
-      client_secret: ROBLOX_CLIENT_SECRET
-      // Note: Roblox supports both sending client_id/secret via Basic Auth or in body.
-      // Using Basic Auth header is recommended:
-      //
-      // headers: {
-      //   'Authorization': `Basic ${basicAuth}`,
-      //   'Content-Type':  'application/x-www-form-urlencoded'
-      // }
-    });
+  // === inside /oauth/callback, replace your token‐exchange with the following ===
+let tokenData;
+try {
+  const tokenUrl  = 'https://apis.roblox.com/oauth/v1/token';
+  const basicAuth = Buffer.from(
+    `${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`
+  ).toString('base64');
+  const params = new URLSearchParams({
+    grant_type:    'authorization_code',
+    code:          code,
+    redirect_uri:  REDIRECT_URI
+    // Note: we are using Basic Auth, so we do NOT need to send client_id and client_secret again in the body.
+  });
+
+  const tokenResponse = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${basicAuth}`,
+      'Content-Type':  'application/x-www-form-urlencoded'
+    },
+    body: params.toString()
+  });
+
+  if (!tokenResponse.ok) {
+    // Log status and response body for debugging:
+    const text = await tokenResponse.text();
+    console.error(`Token exchange failed. Status ${tokenResponse.status}: ${text}`);
+    return res
+      .status(tokenResponse.status)
+      .send(`Failed to exchange code for tokens (see server logs).`);
+  }
+
+  tokenData = await tokenResponse.json();
+} catch (err) {
+  console.error('Error during Roblox token exchange:', err);
+  return res.status(500).send('Error during Roblox token exchange.');
+}
 
     // Perform the POST request
     const tokenResponse = await fetch(tokenUrl, {
