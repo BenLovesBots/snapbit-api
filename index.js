@@ -47,11 +47,11 @@ function calculateLeague(tokenCount) {
   return 'Bronze';
 }
 
-// === COOKIE OPTIONS HELPER ===
-function cookieOptions() {
+// === PROTOCOL-AWARE COOKIE OPTIONS ===
+function cookieOptions(req) {
   return {
     httpOnly: true,
-    secure:   true,
+    secure:   req.protocol === 'https',  // only secure if request is HTTPS
     sameSite: 'Strict',
     path:     '/'
   };
@@ -81,7 +81,7 @@ app.get('/health', (req, res) => {
 // === 2) /auth → Generate state, set cookie, redirect to Roblox ===
 app.get('/auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
-  res.cookie('oauth_state', state, cookieOptions());
+  res.cookie('oauth_state', state, cookieOptions(req));
 
   const authUrl = new URL('https://apis.roblox.com/oauth/v1/authorize');
   authUrl.searchParams.set('client_id',     ROBLOX_CLIENT_ID);
@@ -106,15 +106,17 @@ app.get('/oauth/callback', async (req, res) => {
   if (!returnedState || returnedState !== storedState) {
     return res.status(400).send(
       `Security check failed (state mismatch).<br>` +
-      `Ensure you accessed via the correct URL and that cookies are enabled.`
+      `Ensure you accessed via HTTPS (so the cookie is sent) and that cookies are enabled.`
     );
   }
 
   let tokenData;
   try {
     const tokenUrl  = 'https://apis.roblox.com/oauth/v1/token';
-    const basicAuth = Buffer.from(`${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`).toString('base64');
-    const params    = new URLSearchParams({
+    const basicAuth = Buffer.from(
+      `${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`
+    ).toString('base64');
+    const params = new URLSearchParams({
       grant_type:   'authorization_code',
       code:         code,
       redirect_uri: REDIRECT_URI
@@ -129,7 +131,9 @@ app.get('/oauth/callback', async (req, res) => {
       body: params.toString()
     });
     if (!tokenResponse.ok) {
-      return res.status(tokenResponse.status).send('Failed to exchange code for tokens.');
+      return res
+        .status(tokenResponse.status)
+        .send('Failed to exchange code for tokens.');
     }
     tokenData = await tokenResponse.json();
   } catch (err) {
@@ -168,7 +172,7 @@ app.get('/oauth/callback', async (req, res) => {
   }
 
   const robloxId = payload.sub;
-  res.clearCookie('oauth_state', { path: '/' });
+  res.clearCookie('oauth_state', cookieOptions(req));
 
   return res.redirect(`https://snapbitportal.web.app/dashboard?userId=${robloxId}`);
 });
