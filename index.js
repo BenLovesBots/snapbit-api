@@ -3,7 +3,6 @@ require('dotenv').config();
 const express      = require('express');
 const mongoose     = require('mongoose');
 const crypto       = require('crypto');
-const fetch        = require('node-fetch');
 const jwt          = require('jsonwebtoken');
 const jwkToPem     = require('jwk-to-pem');
 const cookieParser = require('cookie-parser');
