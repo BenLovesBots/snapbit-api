@@ -2,7 +2,6 @@
 
 require('dotenv').config();
 const express      = require('express');
-const cors         = require('cors');            // ← NEW
 const mongoose     = require('mongoose');
 const crypto       = require('crypto');
 const cookieParser = require('cookie-parser');
@@ -10,15 +9,15 @@ const fetch        = require('node-fetch');
 
 const app = express();
 
-// ─── CORS SETUP ──────────────────────────────────────────────────────────────
-// Allow your Firebase front-end origin to call this API
-app.use(cors({
-  origin:  'https://snapbitportal.web.app',
-  methods: ['GET','POST','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization']
-}));
-// Handle CORS preflight requests
-app.options('*', cors());
+// ─── MANUAL CORS MIDDLEWARE ───────────────────────────────────────────────────
+// Allow your Firebase front-end to call these endpoints:
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin',  'https://snapbitportal.web.app');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 // ───────────────────────────────────────────────────────────────────────────────
 
 app.use(express.json());
@@ -66,6 +65,7 @@ function cookieOptions() {
   };
 }
 
+// Auth header check (skips health/auth routes)
 app.use((req, res, next) => {
   if (
     req.path === '/health' ||
@@ -103,7 +103,6 @@ app.get('/oauth/callback', async (req, res) => {
   const { code, state: returnedState, error, error_description } = req.query;
 
   if (error) {
-    const desc = decodeURIComponent(error_description || 'No description');
     return res.redirect(`/auth?error=${encodeURIComponent(error)}`);
   }
 
@@ -120,11 +119,11 @@ app.get('/oauth/callback', async (req, res) => {
     ).toString('base64');
     const params = new URLSearchParams({
       grant_type:   'authorization_code',
-      code:         code,
+      code,
       redirect_uri: REDIRECT_URI
     });
 
-    const tokenResponse = await fetch(tokenUrl, {
+    const tokenRes = await fetch(tokenUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${basicAuth}`,
@@ -133,48 +132,41 @@ app.get('/oauth/callback', async (req, res) => {
       body: params.toString()
     });
 
-    if (!tokenResponse.ok) {
-      const text = await tokenResponse.text();
-      console.error(`Token exchange failed. Status ${tokenResponse.status}: ${text}`);
-      return res.redirect(`/auth?error=${encodeURIComponent('token_exchange_failed')}`);
+    if (!tokenRes.ok) {
+      const txt = await tokenRes.text();
+      console.error(`Token exchange failed ${tokenRes.status}:`, txt);
+      return res.redirect(`/auth?error=token_exchange_failed`);
     }
-
-    tokenData = await tokenResponse.json();
+    tokenData = await tokenRes.json();
   } catch (err) {
-    console.error('Error during Roblox token exchange:', err);
-    return res.redirect(`/auth?error=${encodeURIComponent('token_exchange_error')}`);
+    console.error('Token exchange error:', err);
+    return res.redirect(`/auth?error=token_exchange_error`);
   }
 
   let userInfo;
   try {
     const userRes = await fetch('https://apis.roblox.com/oauth/v1/userinfo', {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${tokenData.access_token}`
-      }
+      headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
     if (!userRes.ok) {
-      const text = await userRes.text();
-      console.error(`Fetching userinfo failed. Status ${userRes.status}: ${text}`);
-      return res.redirect(`/auth?error=${encodeURIComponent('userinfo_failed')}`);
+      const txt = await userRes.text();
+      console.error(`Userinfo fetch failed ${userRes.status}:`, txt);
+      return res.redirect(`/auth?error=userinfo_failed`);
     }
     userInfo = await userRes.json();
   } catch (err) {
-    console.error('Error fetching userinfo:', err);
-    return res.redirect(`/auth?error=${encodeURIComponent('userinfo_error')}`);
+    console.error('Userinfo error:', err);
+    return res.redirect(`/auth?error=userinfo_error`);
   }
 
   const robloxId = userInfo.sub;
   res.clearCookie('oauth_state', cookieOptions());
-
   return res.redirect(`https://snapbitportal.web.app/dashboard?userId=${robloxId}`);
 });
 
 app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
-  if (!userId) {
-    return res.status(400).json({ error: 'Missing userId' });
-  }
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   let record = await Token.findOne({ userId });
   if (!record) {
@@ -200,19 +192,16 @@ app.post('/tokens/add', async (req, res) => {
   if (!userId || typeof amount !== 'number') {
     return res.status(400).json({ error: 'Missing or invalid fields' });
   }
-
   const record = await Token.findOneAndUpdate(
     { userId },
     { $inc: { tokens: amount } },
     { new: true, upsert: true }
   );
-
   const updatedLeague = calculateLeague(record.tokens);
   if (updatedLeague !== record.league) {
     record.league = updatedLeague;
     await record.save();
   }
-
   return res.json({
     userId:   record.userId,
     newTotal: record.tokens,
@@ -222,9 +211,7 @@ app.post('/tokens/add', async (req, res) => {
 
 app.post('/tokens/register', async (req, res) => {
   const { userId } = req.body;
-  if (!userId) {
-    return res.status(400).json({ error: 'Missing userId' });
-  }
+  if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
   const record = await Token.findOneAndUpdate(
     { userId },
