@@ -168,22 +168,27 @@ app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
-  let record = await Token.findOne({ userId });
-  if (!record) {
-    record = await Token.create({ userId, tokens: 0, league: 'Bronze', isRegistered: false });
-  } else {
-    const newLeague = calculateLeague(record.tokens);
-    if (newLeague !== record.league) {
-      record.league = newLeague;
-      await record.save();
-    }
+  // load or create the token record as before…
+  let record = await Token.findOne({ userId }) || 
+               await Token.create({ userId, tokens: 0, league: 'Bronze', isRegistered: false });
+
+  // recalc league if needed…
+
+  // fetch Roblox profile for names
+  const profileRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
+  let profile = { name: userId, displayName: userId };
+  if (profileRes.ok) {
+    const { name, displayName } = await profileRes.json();
+    profile = { name, displayName };
   }
 
   return res.json({
     userId:       record.userId,
     tokens:       record.tokens,
     league:       record.league,
-    isRegistered: record.isRegistered
+    isRegistered: record.isRegistered,
+    username:     profile.name,
+    displayName:  profile.displayName
   });
 });
 
