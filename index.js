@@ -2,12 +2,25 @@
 
 require('dotenv').config();
 const express      = require('express');
+const cors         = require('cors');            // ← NEW
 const mongoose     = require('mongoose');
 const crypto       = require('crypto');
 const cookieParser = require('cookie-parser');
 const fetch        = require('node-fetch');
 
 const app = express();
+
+// ─── CORS SETUP ──────────────────────────────────────────────────────────────
+// Allow your Firebase front-end origin to call this API
+app.use(cors({
+  origin:  'https://snapbitportal.web.app',
+  methods: ['GET','POST','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}));
+// Handle CORS preflight requests
+app.options('*', cors());
+// ───────────────────────────────────────────────────────────────────────────────
+
 app.use(express.json());
 app.use(cookieParser());
 
