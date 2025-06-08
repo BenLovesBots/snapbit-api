@@ -6,11 +6,11 @@ const mongoose     = require('mongoose');
 const crypto       = require('crypto');
 const cookieParser = require('cookie-parser');
 const fetch        = require('node-fetch');
+const jwt          = require('jsonwebtoken');
 
 const app = express();
 
-// ─── MANUAL CORS MIDDLEWARE ───────────────────────────────────────────────────
-// Allow your Firebase front-end to call these endpoints:
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin',  'https://snapbitportal.web.app');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -27,7 +27,8 @@ const {
   MONGO_URI,
   API_KEY,
   ROBLOX_CLIENT_ID,
-  ROBLOX_CLIENT_SECRET
+  ROBLOX_CLIENT_SECRET,
+  RAW_PRIVATE_KEY           // your PEM‐formatted private key in env
 } = process.env;
 
 const PORT         = process.env.PORT || 3000;
@@ -65,15 +66,13 @@ function cookieOptions() {
   };
 }
 
-// Auth header check (skips health/auth routes)
+// enforce API_KEY (skip health & OAuth routes)
 app.use((req, res, next) => {
   if (
     req.path === '/health' ||
     req.path.startsWith('/auth') ||
     req.path.startsWith('/oauth/')
-  ) {
-    return next();
-  }
+  ) return next();
   const auth = req.get('Authorization') || '';
   if (auth !== `Bearer ${API_KEY}`) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -82,9 +81,10 @@ app.use((req, res, next) => {
 });
 
 app.get('/health', (req, res) => {
-  return res.json({ status: 'ok' });
+  res.json({ status: 'ok' });
 });
 
+// initial OAuth redirect
 app.get('/auth', (req, res) => {
   const state = crypto.randomBytes(16).toString('hex');
   res.cookie('oauth_state', state, cookieOptions());
@@ -96,35 +96,35 @@ app.get('/auth', (req, res) => {
   authorizeUrl.searchParams.set('scope',         'openid profile');
   authorizeUrl.searchParams.set('state',         state);
 
-  return res.redirect(authorizeUrl.toString());
+  res.redirect(authorizeUrl.toString());
 });
 
+// OAuth callback → sign JWT & redirect to front-end
 app.get('/oauth/callback', async (req, res) => {
-  const { code, state: returnedState, error, error_description } = req.query;
+  const { code, state: returnedState, error } = req.query;
 
+  // if user cancelled or error, send them to front-end with error flag
   if (error) {
-    return res.redirect(`/auth?error=${encodeURIComponent(error)}`);
+    return res.redirect(`https://snapbitportal.web.app?error=${encodeURIComponent(error)}`);
   }
 
-  const storedState = req.cookies.oauth_state;
-  if (!returnedState || returnedState !== storedState) {
-    return res.redirect(`/auth?error=state_mismatch`);
+  const stored = req.cookies.oauth_state;
+  if (!returnedState || returnedState !== stored) {
+    return res.redirect(`https://snapbitportal.web.app?error=state_mismatch`);
   }
 
+  // exchange code for tokens
   let tokenData;
   try {
-    const tokenUrl  = 'https://apis.roblox.com/oauth/v1/token';
-    const basicAuth = Buffer.from(
-      `${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`
-    ).toString('base64');
-    const params = new URLSearchParams({
+    const basicAuth = Buffer.from(`${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`).toString('base64');
+    const params    = new URLSearchParams({
       grant_type:   'authorization_code',
       code,
       redirect_uri: REDIRECT_URI
     });
 
-    const tokenRes = await fetch(tokenUrl, {
-      method: 'POST',
+    const tokenRes = await fetch('https://apis.roblox.com/oauth/v1/token', {
+      method:  'POST',
       headers: {
         'Authorization': `Basic ${basicAuth}`,
         'Content-Type':  'application/x-www-form-urlencoded'
@@ -133,87 +133,96 @@ app.get('/oauth/callback', async (req, res) => {
     });
 
     if (!tokenRes.ok) {
-      const txt = await tokenRes.text();
-      console.error(`Token exchange failed ${tokenRes.status}:`, txt);
-      return res.redirect(`/auth?error=token_exchange_failed`);
+      return res.redirect(`https://snapbitportal.web.app?error=token_exchange_failed`);
     }
     tokenData = await tokenRes.json();
-  } catch (err) {
-    console.error('Token exchange error:', err);
-    return res.redirect(`/auth?error=token_exchange_error`);
+  } catch {
+    return res.redirect(`https://snapbitportal.web.app?error=token_exchange_error`);
   }
 
+  // fetch user info
   let userInfo;
   try {
     const userRes = await fetch('https://apis.roblox.com/oauth/v1/userinfo', {
       headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
     if (!userRes.ok) {
-      const txt = await userRes.text();
-      console.error(`Userinfo fetch failed ${userRes.status}:`, txt);
-      return res.redirect(`/auth?error=userinfo_failed`);
+      return res.redirect(`https://snapbitportal.web.app?error=userinfo_failed`);
     }
     userInfo = await userRes.json();
-  } catch (err) {
-    console.error('Userinfo error:', err);
-    return res.redirect(`/auth?error=userinfo_error`);
+  } catch {
+    return res.redirect(`https://snapbitportal.web.app?error=userinfo_error`);
   }
 
-  const robloxId = userInfo.sub;
+  // clear state cookie
   res.clearCookie('oauth_state', cookieOptions());
-  return res.redirect(`https://snapbitportal.web.app/dashboard?userId=${robloxId}`);
+
+  // sign a short‐lived JWT with the Roblox ID & names
+  const payload = {
+    sub:         userInfo.sub,
+    name:        userInfo.preferred_username || userInfo.nickname || userInfo.sub,
+    displayName: userInfo.name || userInfo.sub,
+    iat:         Math.floor(Date.now() / 1000),
+    exp:         Math.floor(Date.now() / 1000) + 15 * 60
+  };
+  const privateKey = RAW_PRIVATE_KEY.replace(/\\n/g, '\n');
+  const signedJwt  = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+
+  // redirect with the token param instead of userId
+  res.redirect(`https://snapbitportal.web.app/dashboard?token=${encodeURIComponent(signedJwt)}`);
 });
 
+// token lookup endpoint
 app.get('/tokens', async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
 
-  // load or create the token record as before…
-  let record = await Token.findOne({ userId }) || 
-               await Token.create({ userId, tokens: 0, league: 'Bronze', isRegistered: false });
-
-  // recalc league if needed…
-
-  // fetch Roblox profile for names
-  const profileRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
-  let profile = { name: userId, displayName: userId };
-  if (profileRes.ok) {
-    const { name, displayName } = await profileRes.json();
-    profile = { name, displayName };
+  let record = await Token.findOne({ userId });
+  if (!record) {
+    record = await Token.create({ userId, tokens: 0, league: 'Bronze', isRegistered: false });
+  } else {
+    const newLeague = calculateLeague(record.tokens);
+    if (newLeague !== record.league) {
+      record.league = newLeague;
+      await record.save();
+    }
   }
 
-  return res.json({
+  res.json({
     userId:       record.userId,
     tokens:       record.tokens,
     league:       record.league,
-    isRegistered: record.isRegistered,
-    username:     profile.name,
-    displayName:  profile.displayName
+    isRegistered: record.isRegistered
   });
 });
 
+// add tokens
 app.post('/tokens/add', async (req, res) => {
   const { userId, amount } = req.body;
   if (!userId || typeof amount !== 'number') {
     return res.status(400).json({ error: 'Missing or invalid fields' });
   }
+
   const record = await Token.findOneAndUpdate(
     { userId },
     { $inc: { tokens: amount } },
     { new: true, upsert: true }
   );
+
   const updatedLeague = calculateLeague(record.tokens);
   if (updatedLeague !== record.league) {
     record.league = updatedLeague;
     await record.save();
   }
-  return res.json({
+
+  res.json({
     userId:   record.userId,
     newTotal: record.tokens,
     league:   record.league
   });
 });
 
+// mark registered
 app.post('/tokens/register', async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'Missing userId' });
@@ -223,7 +232,7 @@ app.post('/tokens/register', async (req, res) => {
     { isRegistered: true },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   );
-  return res.json({ userId: record.userId, isRegistered: record.isRegistered });
+  res.json({ userId: record.userId, isRegistered: record.isRegistered });
 });
 
 app.listen(PORT, () => {
