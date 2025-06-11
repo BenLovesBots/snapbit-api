@@ -163,7 +163,7 @@ app.get('/oauth/callback', async (req, res) => {
     name:        userInfo.preferred_username || userInfo.nickname || userInfo.sub,
     displayName: userInfo.name || userInfo.sub,
     iat:         Math.floor(Date.now() / 1000),
-    exp:         Math.floor(Date.now() / 1000) + 15 * 60
+    exp: Math.floor(Date.now()/1000) + 60
   };
   const privateKey = RAW_PRIVATE_KEY.replace(/\\n/g, '\n');
   const signedJwt  = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
