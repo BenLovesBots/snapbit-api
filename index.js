@@ -102,74 +102,88 @@ app.get('/auth', (req, res) => {
 // OAuth callback → sign JWT & redirect to front-end
 app.get('/oauth/callback', async (req, res) => {
   const { code, state: returnedState, error } = req.query;
+  if (error) return res.redirect(`/auth?error=${encodeURIComponent(error)}`);
 
-  // if user cancelled or error, send them to front-end with error flag
-  if (error) {
-    return res.redirect(`https://snapbitportal.web.app?error=${encodeURIComponent(error)}`);
+  const storedState = req.cookies.oauth_state;
+  if (!returnedState || returnedState !== storedState) {
+    return res.redirect(`/auth?error=state_mismatch`);
   }
 
-  const stored = req.cookies.oauth_state;
-  if (!returnedState || returnedState !== stored) {
-    return res.redirect(`https://snapbitportal.web.app?error=state_mismatch`);
-  }
-
-  // exchange code for tokens
+  // 1) Exchange code for access_token
   let tokenData;
   try {
-    const basicAuth = Buffer.from(`${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`).toString('base64');
-    const params    = new URLSearchParams({
-      grant_type:   'authorization_code',
-      code,
-      redirect_uri: REDIRECT_URI
-    });
-
     const tokenRes = await fetch('https://apis.roblox.com/oauth/v1/token', {
-      method:  'POST',
+      method: 'POST',
       headers: {
-        'Authorization': `Basic ${basicAuth}`,
-        'Content-Type':  'application/x-www-form-urlencoded'
+        'Authorization': `Basic ${Buffer.from(
+          `${ROBLOX_CLIENT_ID}:${ROBLOX_CLIENT_SECRET}`
+        ).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
       },
-      body: params.toString()
+      body: new URLSearchParams({
+        grant_type:   'authorization_code',
+        code,
+        redirect_uri: REDIRECT_URI
+      }).toString()
     });
-
-    if (!tokenRes.ok) {
-      return res.redirect(`https://snapbitportal.web.app?error=token_exchange_failed`);
-    }
+    if (!tokenRes.ok) throw new Error(`Token status ${tokenRes.status}`);
     tokenData = await tokenRes.json();
-  } catch {
-    return res.redirect(`https://snapbitportal.web.app?error=token_exchange_error`);
+  } catch (err) {
+    console.error('Token exchange error:', err);
+    return res.redirect(`/auth?error=token_exchange_failed`);
   }
 
-  // fetch user info
+  // 2) Fetch Roblox userinfo (get sub & displayName)
   let userInfo;
   try {
     const userRes = await fetch('https://apis.roblox.com/oauth/v1/userinfo', {
       headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
     });
-    if (!userRes.ok) {
-      return res.redirect(`https://snapbitportal.web.app?error=userinfo_failed`);
-    }
+    if (!userRes.ok) throw new Error(`Userinfo status ${userRes.status}`);
     userInfo = await userRes.json();
-  } catch {
-    return res.redirect(`https://snapbitportal.web.app?error=userinfo_error`);
+  } catch (err) {
+    console.error('Userinfo fetch error:', err);
+    return res.redirect(`/auth?error=userinfo_failed`);
   }
 
-  // clear state cookie
-  res.clearCookie('oauth_state', cookieOptions());
+  const robloxId     = userInfo.sub;
+  const displayName  = userInfo.name;
 
-  // sign a short‐lived JWT with the Roblox ID & names
-  const payload = {
-    sub:         userInfo.sub,
-    name:        userInfo.preferred_username || userInfo.nickname || userInfo.sub,
-    displayName: userInfo.name || userInfo.sub,
-    iat:         Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now()/1000) + 60
-  };
-  const privateKey = RAW_PRIVATE_KEY.replace(/\\n/g, '\n');
-  const signedJwt  = jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+  // 3) Upsert record & mark registered (optional)
+  try {
+    await Token.findOneAndUpdate(
+      { userId: robloxId },
+      {
+        $set: {
+          displayName,
+          isRegistered: true
+        }
+      },
+      { upsert: true, setDefaultsOnInsert: true }
+    );
+  } catch (err) {
+    console.warn('Upsert error:', err);
+  }
 
-  // redirect with the token param instead of userId
-  res.redirect(`https://snapbitportal.web.app/dashboard?token=${encodeURIComponent(signedJwt)}`);
+  // 4) Sign our own JWT with sub & displayName
+  const privateKey = RAW_PRIVATE_KEY.replace(/\\n/g,'\n');
+  const signedJWT  = jwt.sign(
+    { sub: robloxId, displayName },
+    privateKey,
+    { algorithm: 'RS256', expiresIn: '1m' }
+  );
+
+  // 5) Clear state cookie & redirect with token
+  res.clearCookie('oauth_state', {
+    httpOnly: true,
+    secure:   true,
+    sameSite: 'None',
+    path:     '/'
+  });
+
+  return res.redirect(
+    `https://snapbitportal.web.app/dashboard?token=${encodeURIComponent(signedJWT)}`
+  );
 });
 
 // token lookup endpoint
